@@ -1,0 +1,200 @@
+name: Outlook Session Repair
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/outlook-session-repair.yml']
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: outlook-session-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.repository == 'Ko-Kevin/flutter_agent_harness'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout your main branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+
+      - name: Prepare targeted session inheritance fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('.')
+          service = root / 'flutter_app/lib/services/agent_service.dart'
+          sessions = root / 'flutter_app/lib/services/agent_service_sessions.dart'
+          text = service.read_text(encoding='utf-8')
+          clone_text = sessions.read_text(encoding='utf-8')
+          marker = 'FA_OUTLOOK_SESSION_BRIDGE_V1'
+          def once(value, old, new, label):
+              if value.count(old) != 1:
+                  raise SystemExit('Unexpected source at ' + label + '; stopped before writing. No broad replacement attempted.')
+              return value.replace(old, new, 1)
+          if marker not in text:
+              text = once(text, '  final AgentConfig? _config;',
+                  '  // ' + marker + '\n'
+                  '  // Preserve the exact Office facade (including injected test facades).\n'
+                  '  OfficeApi? _officeApiForClone;\n'
+                  '  final AgentConfig? _config;', 'Office bridge field')
+              # Only modify the production constructor, not other service constructors.
+              pos = text.index('  AgentService._withEnv({')
+              head, tail = text[:pos], text[pos:]
+              anchor = '    maybeCurrent = this;'
+              index = tail.find(anchor)
+              if index < 0:
+                  raise SystemExit('Production constructor anchor missing; no files written.')
+              tail = tail[:index] + tail[index:].replace(anchor,
+                  '    _officeApiForClone = officeApi;\n' + anchor, 1)
+              text = head + tail
+              start = clone_text.index('  AgentService clone() {')
+              end = clone_text.index('\n  }', start) + len('\n  }')
+              block = clone_text[start:end]
+              if re.search(r'^\s*officeApi:', block, re.M):
+                  raise SystemExit('clone already passes officeApi; review instead of overwriting.')
+              if re.search(r'^\s*providerRegistry:', block, re.M):
+                  raise SystemExit('clone already passes providerRegistry; review instead of overwriting.')
+              block = once(block, '      config: config,',
+                  '      config: config,\n'
+                  '      // Keep mail tools and their approval guards in new sessions.\n'
+                  '      officeApi: _officeApiForClone ?? bootOfficeApi(),\n'
+                  '      // Keep the live provider registry for credential updates.\n'
+                  '      providerRegistry: _providerRegistry,', 'clone arguments')
+              clone_text = clone_text[:start] + block + clone_text[end:]
+              service.write_text(text, encoding='utf-8')
+              sessions.write_text(clone_text, encoding='utf-8')
+              print('Applied Office bridge and provider registry inheritance fix.')
+          else:
+              if 'officeApi: _officeApiForClone ?? bootOfficeApi(),' not in clone_text:
+                  raise SystemExit('Repair marker exists but clone patch is missing. Stopped.')
+              print('Repair already present; running validation again.')
+          test = root / 'flutter_app/test/services/outlook_clone_bridge_regression_test.dart'
+          test.write_text('''import 'package:fa/services/agent_service.dart';
+          import 'package:fa_office_agent/fa_office_agent.dart';
+          import 'package:flutter_agent_harness/flutter_agent_harness.dart';
+          import 'package:flutter_test/flutter_test.dart';
+
+          void main() {
+            TestWidgetsFlutterBinding.ensureInitialized();
+            AgentConfig config() => AgentConfig(
+              providerKind: 'openai-completions',
+              modelId: 'fixture-model',
+              baseUrl: 'https://example.invalid/test/v1',
+              apiKey: 'synthetic-test-key-not-a-real-credential',
+            );
+            void expectMailTools(AgentService service) {
+              final names = service.toolsForTest.map((tool) => tool.name).toList();
+              expect(names, containsAll([
+                outlookReadCurrentItem,
+                outlookReadAttachment,
+                outlookInsertDraftBody,
+              ]));
+              expect(service.approval.overrideFor(outlookReadAttachment), ApprovalPolicy.prompt);
+              expect(service.approval.overrideFor(outlookInsertDraftBody), ApprovalPolicy.prompt);
+            }
+            test('Office tools and write approval guards survive two new-chat clones', () async {
+              final parent = await AgentService.create(
+                config: config(),
+                env: MemoryExecutionEnv(),
+                officeApi: FakeOfficeContext(),
+                watchExternalSessions: false,
+              );
+              addTearDown(parent.dispose);
+              expectMailTools(parent);
+              final first = parent.clone();
+              addTearDown(first.dispose);
+              expectMailTools(first);
+              final second = first.clone();
+              addTearDown(second.dispose);
+              expectMailTools(second);
+            });
+            test('Non-Office VM services do not acquire mail tools by cloning', () async {
+              final parent = await AgentService.create(
+                config: config(),
+                env: MemoryExecutionEnv(),
+                watchExternalSessions: false,
+              );
+              addTearDown(parent.dispose);
+              final child = parent.clone();
+              addTearDown(child.dispose);
+              expect(child.toolsForTest.any((tool) => tool.name == outlookReadCurrentItem), isFalse);
+            });
+          }
+          ''', encoding='utf-8')
+          (root / 'flutter_app/.env').touch()
+          template = root / 'flutter_app/firebase_options.template.dart'
+          (root / 'flutter_app/lib/firebase_options.dart').write_bytes(template.read_bytes())
+          PY
+
+      - name: Install compiler in GitHub only
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Resolve locked app dependencies
+        uses: ./.github/actions/flutter-pub-get
+
+      - name: Test original Office wiring and new-session inheritance
+        working-directory: flutter_app
+        run: |
+          flutter test test/services/office_wiring_test.dart test/services/outlook_clone_bridge_regression_test.dart
+
+      - name: Commit only validated session repair
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add flutter_app/lib/services/agent_service.dart \
+            flutter_app/lib/services/agent_service_sessions.dart \
+            flutter_app/test/services/outlook_clone_bridge_regression_test.dart
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(outlook): preserve Office bridge and provider registry in cloned chats'
+            git push origin HEAD:main
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger existing repaired Outlook publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run outlook-fix.yml --ref main
+
+      - name: Wait for existing build and deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.commit.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run=''
+          for attempt in $(seq 1 30); do
+            run=$(gh run list --workflow outlook-fix.yml --commit "$SOURCE_SHA" --event workflow_dispatch --limit 10 --json databaseId --jq '.[0].databaseId // empty')
+            [ -z "$run" ] || break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo 'Publisher dispatched; check Outlook Fix and Deploy for its result.'
+            exit 1
+          fi
+          gh run watch "$run" --exit-status --interval 20
+          {
+            echo '## Session bridge repair published'
+            echo "Source commit: $SOURCE_SHA"
+            echo 'Original Office wiring and two-generation clone tests passed before source commit.'
+            echo 'Existing Outlook build and deploy succeeded. No XML or browser credentials changed.'
+            echo 'Live Outlook verification still required: refresh Outlook, open fa Fixed, create a NEW chat and read a non-sensitive test email subject.'
+            echo 'Existing in-memory chats may still have the old tool registry; reopen the add-in and create a fresh chat.'
+          } >> "$GITHUB_STEP_SUMMARY"
