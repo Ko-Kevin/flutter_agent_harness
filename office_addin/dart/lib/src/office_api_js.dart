@@ -248,7 +248,55 @@ final class JsOfficeApi implements OfficeApi {
           '${_readyTimeout.inSeconds} seconds',
         ),
       );
+      // Compatibility probe:
+      // Accept a successful real mailbox operation as evidence that
+      // the Outlook bridge is operational, even if onReady stalls.
+      //
+      // Read the body locally, but never inspect, log, store, or send
+      // its content during this probe.
+      try {
+        final item = _item;
+        final body =
+            item == null ? null : _obj(_prop(item, 'body'));
+        final getBody =
+            body == null ? null : _fn(_prop(body, 'getAsync'));
 
+        if (body != null && getBody != null) {
+          void mailboxProbeCallback(JSAny? result) {
+            if (completer.isCompleted) return;
+
+            try {
+              final asyncResult = _obj(result);
+              if (asyncResult == null) return;
+
+              final status =
+                  _s(_leaf(asyncResult, 'status'));
+
+              if (status == 'succeeded') {
+                readyCallback(
+                  <String, Object?>{
+                    'host': 'Outlook',
+                  }.jsify(),
+                );
+              }
+            } on Object {
+              // Leave the normal readiness path in control.
+            }
+          }
+
+          _applyFn(
+            getBody,
+            body,
+            <JSAny?>[
+              'text'.toJS,
+              mailboxProbeCallback.toJS,
+            ].toJS,
+          );
+        }
+      } on Object {
+        // Probe failure must not grant readiness.
+        // Keep the existing callback and timeout behavior.
+      }
       // Official callback form:
       // Office.onReady(function (info) { ... });
       //
