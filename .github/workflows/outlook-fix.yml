@@ -1,0 +1,223 @@
+
+name: Outlook Fix and Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/outlook-fix.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Install Flutter in cloud only
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Patch names and add regression test
+        shell: bash
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          from urllib.parse import urlsplit
+          root = pathlib.Path('.')
+          replacements = {
+              'outlook.read_current_item': 'outlook_read_current_item',
+              'outlook.read_attachment': 'outlook_read_attachment',
+              'outlook.insert_draft_body': 'outlook_insert_draft_body',
+          }
+          target = root / 'office_addin/dart/lib/src/outlook_tools.dart'
+          original = target.read_text(encoding='utf-8')
+          constants = {
+              'outlookReadCurrentItem': 'outlook.read_current_item',
+              'outlookReadAttachment': 'outlook.read_attachment',
+              'outlookInsertDraftBody': 'outlook.insert_draft_body',
+          }
+          for symbol, old in constants.items():
+              expected = r'const\s+' + re.escape(symbol) + r'\s*=\s*([\'"])' + re.escape(old) + r'\1\s*;'
+              if not re.search(expected, original):
+                  raise SystemExit('Unexpected source version; stopped before patch: ' + symbol)
+          changed = []
+          extensions = {'.dart', '.md', '.json', '.yaml', '.yml', '.js', '.ts', '.html', '.txt'}
+          excluded = {'.git', '.github', '.dart_tool', 'build', 'node_modules'}
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink() or p.suffix not in extensions:
+                  continue
+              if any(part in excluded for part in p.parts):
+                  continue
+              try:
+                  text = p.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              fixed = text
+              for old, new in replacements.items():
+                  fixed = fixed.replace(old, new)
+              if p.suffix == '.dart':
+                  fixed = fixed.replace("'outlook.'", "'outlook_'").replace('"outlook."', '"outlook_"')
+              if fixed != text:
+                  p.write_text(fixed, encoding='utf-8')
+                  changed.append(str(p))
+          assert all(v in target.read_text(encoding='utf-8') for v in replacements.values())
+          test = root / 'office_addin/dart/test/openai_tool_names_regression_test.dart'
+          test.write_text("""import 'package:fa_office_agent/fa_office_agent.dart';
+          import 'package:test/test.dart';
+          void main() {
+            test('Outlook names satisfy OpenAI identifier rules', () {
+              final names = outlookToolSpecs().map((s) => s.name).toList();
+              expect(names, ['outlook_read_current_item', 'outlook_read_attachment', 'outlook_insert_draft_body']);
+              expect(names.toSet().length, names.length);
+              for (final name in names) {
+                expect(RegExp(r'^[a-zA-Z0-9_-]{1,64}$').hasMatch(name), isTrue);
+              }
+              final overrides = officeToolApprovalOverrides();
+              expect(overrides.containsKey('outlook_read_attachment'), isTrue);
+              expect(overrides.containsKey('outlook_insert_draft_body'), isTrue);
+            });
+          }
+          """, encoding='utf-8')
+          site = os.environ['SITE_URL'].rstrip('/')
+          if urlsplit(site).scheme != 'https':
+              raise SystemExit('Expected HTTPS Pages base_url, got: ' + site)
+          prefix = urlsplit(site).path.rstrip('/') + '/outlook/app/'
+          script = root / 'scripts/build_office_addin.sh'
+          text = script.read_text(encoding='utf-8')
+          anchor = '--base-href=/outlook/app/'
+          if anchor not in text:
+              raise SystemExit('Build script changed; cannot safely adjust project path')
+          script.write_text(text.replace(anchor, '--base-href=' + prefix), encoding='utf-8')
+          (root / 'flutter_app/.env').touch()
+          template = root / 'flutter_app/firebase_options.template.dart'
+          (root / 'flutter_app/lib/firebase_options.dart').write_bytes(template.read_bytes())
+          print('Patched source files:', len(changed))
+          print('\n'.join(changed))
+          print('Web base href:', prefix)
+          PY
+
+      - name: Resolve app dependencies with repository lockfile
+        uses: ./.github/actions/flutter-pub-get
+
+      - name: Test Office tools including renamed identifiers
+        working-directory: office_addin/dart
+        run: |
+          dart pub get
+          dart test
+
+      - name: Test app wiring and mail tool dispatch
+        working-directory: flutter_app
+        run: flutter test test/services/office_wiring_test.dart
+
+      - name: Build Outlook web app with Office bridge
+        run: bash scripts/build_office_addin.sh
+
+      - name: Prepare your own manifest and Pages files
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          python3 - <<'PY'
+          import html, os, pathlib, uuid, xml.etree.ElementTree as ET
+          from urllib.parse import urlsplit
+          site = os.environ['SITE_URL'].rstrip('/')
+          split = urlsplit(site)
+          origin = split.scheme + '://' + split.netloc
+          prefix = split.path.rstrip('/') + '/outlook/app/'
+          root = pathlib.Path('build/pages/root')
+          manifest = root / 'outlook/manifest.xml'
+          text = manifest.read_text(encoding='utf-8')
+          old_id = '4D907D39-1309-4EF7-953B-13A88FAF1C60'
+          if old_id not in text:
+              raise SystemExit('Unexpected manifest ID; review before deploying')
+          new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, site + '/outlook-fixed'))
+          text = text.replace(old_id, new_id)
+          text = text.replace('<Version>1.2.0.0</Version>', '<Version>1.2.0.1</Version>')
+          text = text.replace('https://fa1.dev/outlook', site + '/outlook')
+          text = text.replace('<AppDomain>https://fa1.dev</AppDomain>', '<AppDomain>' + origin + '</AppDomain>')
+          text = text.replace('DefaultValue="fa"', 'DefaultValue="fa Fixed"')
+          doc = ET.fromstring(text)
+          for element in doc.iter():
+              tag = element.tag.split('}')[-1]
+              if tag == 'SourceLocation' or (tag == 'Url' and element.get('id') == 'taskpaneUrl'):
+                  url = element.get('DefaultValue', '')
+                  if not url.startswith(site + '/outlook/app/'):
+                      raise SystemExit('Taskpane URL was not rewritten: ' + url)
+              if tag == 'AppDomain' and element.text != origin:
+                  raise SystemExit('Incorrect AppDomain origin')
+          manifest.write_text(text, encoding='utf-8')
+          for p in (root / 'outlook').glob('*.html'):
+              value = p.read_text(encoding='utf-8')
+              value = value.replace('https://fa1.dev/outlook', site + '/outlook')
+              value = value.replace('"/outlook/', '"' + split.path.rstrip('/') + '/outlook/')
+              value = value.replace("'/outlook/", "'" + split.path.rstrip('/') + '/outlook/')
+              p.write_text(value, encoding='utf-8')
+          app = root / 'outlook/app/index.html'
+          html_text = app.read_text(encoding='utf-8')
+          if '<base href="' + prefix + '"' not in html_text:
+              raise SystemExit('Built app base href does not match Pages project path')
+          if 'appsforoffice.microsoft.com/lib/1/hosted/office.js' not in html_text:
+              raise SystemExit('Built app is missing Office.js')
+          if not (root / 'outlook/app/main.dart.js').is_file():
+              raise SystemExit('Compiled app is missing')
+          if list(root.rglob('.env')):
+              for p in root.rglob('.env'):
+                  if p.read_bytes().strip():
+                      raise SystemExit('Refusing to publish a non-empty .env')
+          link = site + '/outlook/manifest.xml'
+          (root / '.nojekyll').touch()
+          (root / 'index.html').write_text(
+              '<!doctype html><meta charset="utf-8"><title>Fa Outlook Fixed</title>'
+              '<h1>Fa Outlook Fixed</h1><p>Tool-name compatibility build.</p>'
+              '<p><a download="fa-outlook-fixed.xml" href="' + html.escape(link, quote=True) + '">Download Outlook manifest</a></p>'
+              '<p>Configure your provider privately inside the add-in. Never commit credentials.</p>', encoding='utf-8')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('## Fa Outlook repaired build\n\n')
+              f.write('Source commit: `' + os.environ['GITHUB_SHA'] + '`\n\n')
+              f.write('After successful deployment, download manifest: ' + link + '\n\n')
+              f.write('New add-in name: **fa Fixed**. ID: `' + new_id + '`\n\n')
+              f.write('Tool identifiers renamed; Office package and app wiring tests passed. Real company API and live Outlook have NOT been tested by this workflow.\n')
+          print('Manifest ready:', link)
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/pages/root
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish repaired site
+        id: deployment
+        uses: actions/deploy-pages@v4
