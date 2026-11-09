@@ -14,5 +14,5 @@ export 'src/email_quarantine.dart';
 export 'src/fake_office.dart';
 export 'src/manifest.dart';
 export 'src/office_api.dart';
-export 'src/_web_empty.dart' if (dart.library.html) 'src/office_api_js.dart';
+export 'src/_web_empty.dart' if (dart.library.js_interop) 'src/office_api_js.dart';
 export 'src/outlook_tools.dart';
