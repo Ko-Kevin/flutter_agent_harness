@@ -1,0 +1,386 @@
+name: Outlook Comfort Update
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/outlook-comfort-update.yml']
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: outlook-comfort-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.repository == 'Ko-Kevin/flutter_agent_harness'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+
+      - name: Prepare integrated source changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          root = pathlib.Path('.')
+          changes = {}
+          marker = 'FA_OUTLOOK_COMFORT_V1'
+          def read(path):
+              return (root / path).read_text(encoding='utf-8')
+          def change(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Source layout differs at {label}: expected 1 match, found {count}. No files written. Do not force replacement.')
+              return text.replace(old, new, 1)
+          def store(path, text):
+              changes[path] = text
+          if marker in read('packages/fa_ui/lib/src/stores/provider_registry.dart'):
+              print('Comfort patch already installed; keeping existing source.')
+          else:
+              base = 'packages/fa_ui/lib/src/stores/'
+              store(base + 'outlook_comfort_storage.dart', '''// FA_OUTLOOK_COMFORT_V1
+          import 'package:flutter/foundation.dart' show kIsWeb;
+          import 'outlook_comfort_storage_stub.dart'
+              if (dart.library.js_interop) 'outlook_comfort_storage_web.dart' as impl;
+          const bool faComfortEnabled = kIsWeb &&
+              bool.fromEnvironment('FA_OUTLOOK_COMFORT');
+          String? faComfortRead(String key) =>
+              faComfortEnabled ? impl.readValue(key) : null;
+          void faComfortWrite(String key, String? value) {
+            if (!faComfortEnabled) return;
+            if (!impl.writeValue(key, value)) {
+              throw StateError('Browser storage unavailable. Settings were not saved on this device.');
+            }
+          }
+          ''')
+              store(base + 'outlook_comfort_storage_stub.dart', '''String? readValue(String key) => null;
+          bool writeValue(String key, String? value) => false;
+          ''')
+              store(base + 'outlook_comfort_storage_web.dart', '''import 'dart:js_interop';
+          // Private browser storage, not the agent sandbox filesystem.
+          // Local storage is NOT an encrypted credential vault.
+          @JS('window.localStorage.getItem')
+          external JSString? _read(JSString key);
+          @JS('window.localStorage.setItem')
+          external void _write(JSString key, JSString value);
+          @JS('window.localStorage.removeItem')
+          external void _remove(JSString key);
+          String _slot(String key) => 'faFixed.comfort.v1:' + key;
+          String? readValue(String key) {
+            try { return _read(_slot(key).toJS)?.toDart; }
+            on Object { return null; }
+          }
+          bool writeValue(String key, String? value) {
+            try {
+              if (value == null) { _remove(_slot(key).toJS); }
+              else { _write(_slot(key).toJS, value.toJS); }
+              return _read(_slot(key).toJS)?.toDart == value;
+            } on Object { return false; }
+          }
+          ''')
+              path = base + 'provider_registry.dart'
+              text = read(path)
+              text = change(text, "import 'dart:convert';", "import 'dart:convert';\nimport 'outlook_comfort_storage.dart';\n// " + marker, 'registry import')
+              text = change(text, '    await registry._load();', '    await registry._load();\n    registry._restoreComfortState();', 'registry restore')
+              text = change(text, '  void rememberKey(String id, String key) {', '''  void rememberKey(String id, String key) {
+              if (faComfortEnabled) {
+                final owner = _providers.where((p) => p.id == id).firstOrNull;
+                if (owner == null) {
+                  throw StateError('Cannot save a key for an unknown provider.');
+                }
+                faComfortWrite('key:' + id, key.isEmpty ? null : jsonEncode({
+                  'endpoint': owner.baseUrl, 'key': key,
+                }));
+              }''', 'remember current credential')
+              text = change(text, '  Future<void> remove(String id) async {', '''  Future<void> remove(String id) async {
+              if (faComfortEnabled) faComfortWrite('key:' + id, null);''', 'forget credential on delete')
+              text = change(text, '    _providers[index] = updated;', '''    if (faComfortEnabled && _providers[index].baseUrl != updated.baseUrl) {
+                faComfortWrite('key:' + updated.id, null);
+                _sessionKeys.remove(updated.id);
+              }
+              _providers[index] = updated;''', 'do not reuse credentials across endpoints')
+              text = change(text, '  Future<void> _save() async {', '''  void _restoreComfortState() {
+              if (!faComfortEnabled) return;
+              try {
+                final snapshot = faComfortRead('providers');
+                if (snapshot != null) _applyPersisted(snapshot);
+              } on Object {
+                // Retain the original fallback for corrupt browser data.
+              }
+              for (final provider in _providers) {
+                try {
+                  final raw = faComfortRead('key:' + provider.id);
+                  if (raw == null) continue;
+                  final decoded = jsonDecode(raw);
+                  if (decoded is Map && decoded['endpoint'] == provider.baseUrl &&
+                      decoded['key'] is String && (decoded['key'] as String).isNotEmpty) {
+                    _sessionKeys[provider.id] = decoded['key'] as String;
+                  }
+                } on Object {
+                  // Never attach malformed or endpoint-mismatched credentials.
+                }
+              }
+            }
+            Future<void> _save() async {
+              if (faComfortEnabled) {
+                faComfortWrite('providers', jsonEncode({
+                  'version': _version,
+                  'providers': [for (final provider in _providers) provider.toJson()],
+                  'presetModels': _presetModels,
+                }));
+              }''', 'synchronous browser settings mirror')
+              store(path, text)
+              path = 'packages/fa_ui/lib/fa_ui.dart'
+              store(path, read(path) + "\nexport 'src/stores/outlook_comfort_storage.dart';\n")
+
+              path = 'flutter_app/lib/services/last_connection.dart'
+              text = read(path)
+              text = change(text, '    _connection = connection;', '''    _connection = connection;
+              if (faComfortEnabled) {
+                faComfortWrite('connection', jsonEncode(connection.toJson()));
+              }''', 'save default connection locally')
+              text = change(text, '  Future<void> _load() async {', '''  Future<void> _load() async {
+              if (faComfortEnabled) {
+                try {
+                  final raw = faComfortRead('connection');
+                  if (raw != null) {
+                    final decoded = jsonDecode(raw);
+                    if (decoded is Map<String, dynamic>) {
+                      final restored = LastConnection.fromJson(decoded);
+                      if (!_isRemovedKind(restored.providerKind)) {
+                        _connection = restored;
+                        return;
+                      }
+                    }
+                  }
+                } on Object {
+                  // Fall back to the existing non-secret connection record.
+                }
+              }''', 'load default connection before sandbox restore')
+              store(path, text)
+
+              path = 'flutter_app/lib/services/agent_service.dart'
+              text = read(path)
+              text = change(text, '        FaApprovalModeController,', '        FaApprovalModeController,\n        faComfortEnabled,\n        faComfortWrite,', 'service helper imports')
+              # This assignment exists in constructor AND reconfigure. Only
+              # patch the reconfigure method, after its connection checks.
+              head, sep, tail = text.partition('  Future<void> reconfigure(')
+              if not sep:
+                  raise SystemExit('Cannot find reconfigure; no files written.')
+              tail = change(tail, '    _activeApiKey = config.apiKey;', '''    _activeApiKey = config.apiKey;
+              // Persist selection only; keys have a separate browser slot.
+              if (faComfortEnabled && config.baseUrl.isNotEmpty &&
+                  config.modelId.isNotEmpty && config.modelId != 'placeholder') {
+                faComfortWrite('connection', jsonEncode({
+                  'providerKind': config.providerKind,
+                  'modelId': config.modelId,
+                  'baseUrl': config.baseUrl,
+                }));
+              }''', 'remember model changes')
+              store(path, head + sep + tail)
+              path = 'flutter_app/lib/services/agent_service_wiring.dart'
+              text = read(path)
+              if 'final currentKey' not in text:
+                  raise SystemExit('Existing live-key fix missing; no files written.')
+              text = change(text, "(registry?.keyFor(provider.id) ?? config.apiKey)", "(registry?.keyFor(provider.id) ?? '')", 'respect explicit key clearing')
+              store(path, text)
+
+              path = 'flutter_app/lib/ui/widgets/wide_layout_shell.dart'
+              text = read(path)
+              text = change(text, '  Future<void> _newSession() async {', '''  Future<void> _newSession() async {
+              if (faComfortEnabled) {
+                await _mintSessionFromBrand();
+                return;
+              }''', 'one-click new chat without folder dialog')
+              anchor = '      await _createSessionInChosenFolder(target.service, target.config);'
+              text = change(text, anchor, anchor + '''
+                if (faComfortEnabled && mounted && _isNarrow) {
+                  unawaited(_pushNarrowChat());
+                }''', 'open composer after creating narrow chat')
+              store(path, text)
+
+              path = 'packages/fa_ui/lib/src/providers/provider_editor_page.dart'
+              text = read(path)
+              text = change(text, "import 'package:flutter/material.dart';", "import 'package:flutter/material.dart';\nimport 'package:fa_ui/src/stores/outlook_comfort_storage.dart';", 'editor helpers')
+              text = change(text, '  var _reauthRunning = false;', '''  var _reauthRunning = false;
+            Future<void> _clearDeviceKey() async {
+              final provider = widget.initial;
+              final registry = widget.registry;
+              if (provider == null || registry == null) return;
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('清除已保存的 API Key？'),
+                  content: const Text('删除此设备保存的该服务密钥，保留地址、模型和聊天。'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('取消')),
+                    TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('清除')),
+                  ],
+                ),
+              );
+              if (confirmed != true || !mounted) return;
+              try {
+                registry.rememberKey(provider.id, '');
+                _keyController.clear();
+                setState(() => _error = '已清除在此设备保存的 API Key。');
+              } on Object {
+                setState(() => _error = '清除失败：浏览器可能禁止访问本地存储。');
+              }
+            }''', 'clear key action')
+              text = change(text, '              ...faFormErrorBlock(context, _error),', '''              if (faComfortEnabled) ...[
+                          const Text('此修复版在当前设备保存配置和 API Key。密钥不上传到 GitHub，但本地存储不是加密保险库。'),
+                          if (widget.initial != null && widget.registry != null)
+                            TextButton.icon(
+                              onPressed: _clearDeviceKey,
+                              icon: const Icon(Icons.key_off),
+                              label: const Text('清除已保存的 API Key'),
+                            ),
+                        ],
+                        ...faFormErrorBlock(context, _error),''', 'storage notice and clear control')
+              text = change(text, ': faEditorKeyNote(strings),', ": (faComfortEnabled ? '保存后将在此设备记住配置和密钥。' : faEditorKeyNote(strings)),", 'replace session-only note')
+              store(path, text)
+              path = 'scripts/build_office_addin.sh'
+              store(path, change(read(path), '--dart-define=FA_HOST=office )', '--dart-define=FA_HOST=office --dart-define=FA_OUTLOOK_COMFORT=true )', 'enable feature in Office build only'))
+              store('flutter_app/test/services/outlook_comfort_browser_test.dart', '''import 'package:flutter_test/flutter_test.dart';
+          import 'package:fa_ui/fa_ui.dart';
+          import 'package:flutter_agent_harness/flutter_agent_harness.dart';
+          import 'package:fa/services/last_connection.dart';
+          import 'package:fa/boot/boot_config_codec.dart';
+          void main() {
+            TestWidgetsFlutterBinding.ensureInitialized();
+            test('provider key and default model survive fresh registry creation', () async {
+              expect(faComfortEnabled, isTrue);
+              const endpoint = 'https://example.invalid/comfort-test/v1';
+              // Synthetic fixture; never an actual credential.
+              const fixture = 'test-only-not-a-real-key';
+              final env = MemoryExecutionEnv();
+              final first = await ProviderRegistry.load(env);
+              final provider = await first.add(name: 'Comfort test', baseUrl: endpoint, modelId: 'model-test');
+              first.rememberKey(provider.id, fixture);
+              final sandbox = (await env.readTextFile('/providers.json')).valueOrNull ?? '';
+              expect(sandbox.contains(fixture), isFalse);
+              final connection = await LastConnectionStore.load(env);
+              await connection.save(const LastConnection(providerKind: 'openai-completions', modelId: 'model-test', baseUrl: endpoint));
+              final otherEnv = MemoryExecutionEnv();
+              final second = await ProviderRegistry.load(otherEnv);
+              final saved = await LastConnectionStore.load(otherEnv);
+              expect(second.keyFor(provider.id), fixture);
+              expect(saved.connection?.modelId, 'model-test');
+              final boot = restorableBootConfig(connection: saved.connection, registry: second, sessionKeysStore: null);
+              expect(boot?.modelId, 'model-test');
+              expect(boot?.apiKey, fixture);
+              second.rememberKey(provider.id, '');
+              final cleared = await ProviderRegistry.load(MemoryExecutionEnv());
+              expect(cleared.keyFor(provider.id), isNull);
+              await cleared.remove(provider.id);
+              faComfortWrite('connection', null);
+              final removed = await ProviderRegistry.load(MemoryExecutionEnv());
+              expect(removed.providers.where((p) => p.id == provider.id), isEmpty);
+            }, skip: !faComfortEnabled);
+          }
+          ''')
+              for path, text in changes.items():
+                  destination = root / path
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_text(text, encoding='utf-8')
+              print('Prepared', len(changes), 'source files; no actual credentials embedded.')
+          (root / 'flutter_app/.env').touch()
+          template = root / 'flutter_app/firebase_options.template.dart'
+          (root / 'flutter_app/lib/firebase_options.dart').write_bytes(template.read_bytes())
+          PY
+
+      - name: Install compiler on GitHub only
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        uses: ./.github/actions/flutter-pub-get
+
+      - name: Test browser persistence and boot restoration
+        working-directory: flutter_app
+        run: flutter test --platform chrome --dart-define=FA_OUTLOOK_COMFORT=true test/services/outlook_comfort_browser_test.dart
+
+      - name: Format modified source
+        run: |
+          dart format packages/fa_ui/lib/src/stores/outlook_comfort_storage*.dart \
+            packages/fa_ui/lib/src/stores/provider_registry.dart \
+            packages/fa_ui/lib/src/providers/provider_editor_page.dart \
+            packages/fa_ui/lib/fa_ui.dart \
+            flutter_app/lib/services/last_connection.dart \
+            flutter_app/lib/services/agent_service.dart \
+            flutter_app/lib/services/agent_service_wiring.dart \
+            flutter_app/lib/ui/widgets/wide_layout_shell.dart \
+            flutter_app/test/services/outlook_comfort_browser_test.dart
+
+      - name: Disable competing original Pages workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow list --all --json id,name,state --jq '.[] | select(.name == "Pages" and .state == "active") | .id' > /tmp/pages-workflows.txt
+          while IFS= read -r id; do
+            [ -z "$id" ] || gh workflow disable "$id"
+          done < /tmp/pages-workflows.txt
+
+      - name: Commit tested source and start existing publisher
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            packages/fa_ui/lib/src/stores/outlook_comfort_storage*.dart \
+            packages/fa_ui/lib/src/stores/provider_registry.dart \
+            packages/fa_ui/lib/src/providers/provider_editor_page.dart \
+            packages/fa_ui/lib/fa_ui.dart \
+            flutter_app/lib/services/last_connection.dart \
+            flutter_app/lib/services/agent_service.dart \
+            flutter_app/lib/services/agent_service_wiring.dart \
+            flutter_app/lib/ui/widgets/wide_layout_shell.dart \
+            flutter_app/test/services/outlook_comfort_browser_test.dart \
+            scripts/build_office_addin.sh
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(outlook): remember credentials and model, streamline new chats'
+            git push origin HEAD:main
+          fi
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          gh workflow run outlook-fix.yml --ref main
+          echo "## Comfort update" >> "$GITHUB_STEP_SUMMARY"
+          echo "Browser storage/boot test passed; source commit: $sha" >> "$GITHUB_STEP_SUMMARY"
+          echo "Existing Outlook publisher started. Waiting for build and deployment." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for existing build tests and deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.publish.outputs.sha }}
+        run: |
+          set -euo pipefail
+          run=''
+          for attempt in $(seq 1 30); do
+            run=$(gh run list --workflow outlook-fix.yml --commit "$SOURCE_SHA" --event workflow_dispatch --limit 10 --json databaseId --jq '.[0].databaseId // empty')
+            [ -z "$run" ] || break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo 'Publisher dispatched, but its run could not be located. Check Outlook Fix and Deploy.'
+            exit 1
+          fi
+          gh run watch "$run" --exit-status --interval 20
+          echo '## Published' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Build/deploy succeeded. Reopen fa Fixed, save provider credentials and select the model once; then verify close/reopen.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Browser persistence has an automated test. Live Outlook UI, Personal navigation, corporate API and desktop persistence still need real-world verification.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No installed XML or Pages origin was changed. No actual API key is present in this workflow or source.' >> "$GITHUB_STEP_SUMMARY"
