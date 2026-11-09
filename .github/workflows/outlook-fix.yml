@@ -162,7 +162,7 @@ jobs:
           doc = ET.fromstring(text)
           for element in doc.iter():
               tag = element.tag.split('}')[-1]
-              if tag == 'SourceLocation' or (tag == 'Url' and element.get('id') == 'taskpaneUrl'):
+              if (tag == 'SourceLocation' and element.get('DefaultValue') is not None) or (tag == 'Url' and element.get('id') == 'taskpaneUrl'):
                   url = element.get('DefaultValue', '')
                   if not url.startswith(site + '/outlook/app/'):
                       raise SystemExit('Taskpane URL was not rewritten: ' + url)
