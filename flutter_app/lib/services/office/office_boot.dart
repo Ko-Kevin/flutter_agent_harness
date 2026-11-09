@@ -8,4 +8,4 @@
 /// surface.
 library;
 
-export 'office_boot_stub.dart' if (dart.library.html) 'office_boot_web.dart';
+export 'office_boot_stub.dart' if (dart.library.js_interop) 'office_boot_web.dart';
