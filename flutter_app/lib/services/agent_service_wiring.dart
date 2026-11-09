@@ -19,21 +19,46 @@ extension AgentServiceWiring on AgentService {
     if (config.providerKind == webLlmProviderKind) {
       return webLlmStreamFunction(createWebLlmService());
     }
+
     if (config.providerKind == transformersJsProviderKind) {
       return transformersJsStreamFunction(createTransformersJsService());
     }
-    // CodeMie: the cookie rides in model.headers (set by toModel); pass an
-    // empty key so the adapter skips `Authorization: Bearer`.
-    final apiKey = isCodeMieProvider(config.baseUrl) ? '' : config.apiKey;
-    // Issue #327: provider auth failures surface the owning row's name —
-    // a bare `401: No cookie auth credentials found` gives the user no
-    // idea WHICH provider row to fix. On-device bridges keep raw errors.
+
+    // Resolve the API key when each request starts, rather than capturing
+    // it only when the connection is first created.
+    //
+    // Match the exact configured endpoint. Do not borrow credentials
+    // from a different provider endpoint.
+    //
+    // CodeMie keeps cookie authentication in model.headers, so its
+    // adapter must continue receiving an empty bearer key.
     return decorateAuthErrors(
-      providerStreamFunction(
-        config.providerKind,
-        apiKey,
-        sessionId: () => _session?.cachedId,
-      ),
+      (model, context, {cancelToken}) {
+        final registry = _providerRegistry;
+        final provider = registry?.byBaseUrl(config.baseUrl);
+
+        final currentKey = provider == null
+            ? config.apiKey
+            : (registry?.keyFor(provider.id) ?? config.apiKey);
+
+        final usesCookieAuth = isCodeMieProvider(config.baseUrl);
+
+        if (!usesCookieAuth &&
+            provider != null &&
+            provider.requiresKey &&
+            currentKey.trim().isEmpty) {
+          throw StateError(
+            'API key missing for the selected provider. '
+            'Enter it in provider settings and save.',
+          );
+        }
+
+        return providerStreamFunction(
+          config.providerKind,
+          usesCookieAuth ? '' : currentKey,
+          sessionId: () => _session?.cachedId,
+        )(model, context, cancelToken: cancelToken);
+      },
       () => _connectionDisplayName(
         _providerRegistry,
         config.baseUrl,
@@ -53,12 +78,15 @@ extension AgentServiceWiring on AgentService {
     // Seed for the live re-enable ([AgentServiceAppConfig]).
     if (bootSecrets.isNotEmpty) _bootSecrets = bootSecrets;
     if (redactor == null) return;
+
     attachSecretRedactor(_agent, redactor);
+
     // The layered pipeline (issue #24), now config-driven (AC4); a
     // yaml-disabled one stays null, exactly like the CLI.
     if (_yamlRedactConfig is RedactionConfig && !_yamlRedactConfig!.enabled) {
       return;
     }
+
     _redactionPipeline ??= RedactionPipeline(
       registeredSecrets: [
         for (final value in bootSecrets.values)
@@ -66,6 +94,7 @@ extension AgentServiceWiring on AgentService {
       ],
       config: _yamlRedactConfig ?? const RedactionConfig(),
     );
+
     attachRedactionPipeline(_agent, _redactionPipeline!);
   }
 
@@ -86,6 +115,7 @@ extension AgentServiceWiring on AgentService {
       if (handler == null) return ApprovalDecision.deny;
       return handler(request);
     };
+
     attachApproval(_agent, approval);
   }
 
@@ -130,6 +160,7 @@ extension AgentServiceWiring on AgentService {
   /// place so model/provider switches preserve the sections).
   String _composeSystemPrompt(AgentConfig config) {
     final base = _effectiveAgentSystemPrompt(config, _redactor);
+
     final parts = [
       base,
       ?_projectMountNote(),
@@ -137,6 +168,7 @@ extension AgentServiceWiring on AgentService {
       if (_memorySection.isNotEmpty) _memorySection,
       if (_messagingSection().isNotEmpty) _messagingSection(),
     ];
+
     return parts.join('\n\n');
   }
 
@@ -145,11 +177,13 @@ extension AgentServiceWiring on AgentService {
   /// (and thus the mailbox prefix) exists.
   String _messagingSection() {
     final manager = _subagentManager;
+
     if (manager == null ||
         manager.messaging == null ||
         manager.mailboxPrefix.isEmpty) {
       return '';
     }
+
     return appMessagingSectionPrompt.replaceAll(
       '{{mailbox}}',
       manager.mailboxOf(manager.selfId),
@@ -161,9 +195,12 @@ extension AgentServiceWiring on AgentService {
   Future<void> _refreshMemorySection() async {
     final controller = _memoryController;
     final config = _config;
+
     if (controller == null || config == null) return;
+
     final section = await controller.formatPromptSection();
     if (section == _memorySection) return;
+
     _memorySection = section;
     _agent.state.systemPrompt = _composeSystemPrompt(config);
   }
@@ -174,10 +211,13 @@ extension AgentServiceWiring on AgentService {
     // [AgentService.create] always wraps the shared env in
     // [SecretsExecutionEnv]; look through it for the mount env.
     var env = this.env;
+
     if (env is SecretsExecutionEnv) env = env.delegate;
     if (env is! ProjectMountEnv) return null;
+
     final root = env.mountedRoot;
     if (root == null) return null;
+
     return 'A project folder is mounted at $projectMountSegment '
         '(host: $root). File tools take $projectMountSegment/... paths; '
         'shell commands work on the host path directly (cd $root).';
@@ -187,6 +227,7 @@ extension AgentServiceWiring on AgentService {
   /// (the file browser's open/unmount flow).
   void refreshProjectMountPrompt() {
     final config = _config;
+
     if (config != null) {
       _agent.state.systemPrompt = _composeSystemPrompt(config);
     }
@@ -197,7 +238,11 @@ extension AgentServiceWiring on AgentService {
   HarnessLlmSlot? _resolveMemoryLlmSlot() {
     final role = _taskRolesResolver?.resolveRole(smolModelRole);
     if (role != null) return role;
-    return (model: _agent.state.model, stream: _agent.streamFunction);
+
+    return (
+      model: _agent.state.model,
+      stream: _agent.streamFunction,
+    );
   }
 
   /// Routes the ask tool's questions to the installed [askHandler].
@@ -206,6 +251,7 @@ extension AgentServiceWiring on AgentService {
   ) async {
     final handler = askHandler;
     if (handler == null) return null;
+
     return handler(questions);
   }
 
@@ -220,8 +266,10 @@ extension AgentServiceWiring on AgentService {
   ) async {
     final handler = secretRequestHandler;
     if (handler == null) return null;
+
     final result = await handler(name, reason);
     if (result == null) return null;
+
     return acceptSecretGrant(result);
   }
 
@@ -242,16 +290,21 @@ extension AgentServiceWiring on AgentService {
   void _reconcileSessionKeySecrets() {
     final env = _secretsEnv;
     final store = _sessionKeys;
+
     if (env == null || store == null) return;
+
     final savedNames = store.names.toSet();
+
     for (final name in _storeSecretNames.difference(savedNames).toList()) {
       env.revokeSecret(name);
       _storeSecretNames.remove(name);
     }
+
     for (final name in savedNames) {
       final value = store.valueOf(name);
       if (value == null || value.isEmpty) continue;
       if (env.secretsSnapshot()[name] == value) continue;
+
       env.addSecrets({name: value});
       _registerRedactionSecret(name, value);
       _storeSecretNames.add(name);
@@ -271,8 +324,10 @@ extension AgentServiceWiring on AgentService {
     // these; the grant still applies for the caller, it just is not
     // persisted or injected — [RequestSecretResult.persisted] reflects that.
     await _sessionKeys?.set(result.name, result.value);
+
     _secretsEnv?.addSecrets({result.name: result.value});
     _registerRedactionSecret(result.name, result.value);
+
     return RequestSecretResult(
       name: result.name,
       value: result.value,
@@ -288,8 +343,4 @@ extension AgentServiceWiring on AgentService {
   /// the settings Task models section uses it as the editor's placeholder.
   String get agentModelId => _agent.state.model.id;
 
-  /// The agent's opt-in hub membership (issue #402) — surfaces read the
-  /// live state and toggle the join from here.
-  AgentNetworkController get agentNetwork =>
-      _agentNetwork ?? (throw StateError('agentNetwork before initialize()'));
-}
+  /// The
