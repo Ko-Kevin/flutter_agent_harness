@@ -173,6 +173,10 @@ extension AgentServiceSessions on AgentService {
     return AgentService._withEnv(
       env: env,
       config: config,
+      // Keep mail tools and their approval guards in new sessions.
+      officeApi: _officeApiForClone ?? bootOfficeApi(),
+      // Keep the live provider registry for credential updates.
+      providerRegistry: _providerRegistry,
       sessionsRoot: sessionsRoot,
       redactor: _redactor,
       streamFunction: _agent.streamFunction,

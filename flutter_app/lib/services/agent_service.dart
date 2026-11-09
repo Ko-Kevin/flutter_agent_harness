@@ -587,6 +587,7 @@ class AgentService extends ChangeNotifier
                },
        ),
        sessionsRoot = sessionsRoot {
+    _officeApiForClone = officeApi;
     maybeCurrent = this;
     // Issue #522: deletions refuse sessions with a live CLI heartbeat.
     _repo = JsonlSessionRepo(
@@ -1537,6 +1538,9 @@ class AgentService extends ChangeNotifier
   /// The relayed session id currently attached to (the manager's entry
   /// key can lag it). `null` on local services.
   String? get liveSessionId => null;
+  // FA_OUTLOOK_SESSION_BRIDGE_V1
+  // Preserve the exact Office facade (including injected test facades).
+  OfficeApi? _officeApiForClone;
   final AgentConfig? _config;
 
   /// The execution environment the agent's tools (and session storage) run
