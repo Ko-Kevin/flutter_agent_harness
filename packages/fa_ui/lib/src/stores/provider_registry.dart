@@ -4,6 +4,9 @@
 
 import 'dart:convert';
 
+import 'outlook_comfort_storage.dart';
+// FA_OUTLOOK_COMFORT_V1
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_agent_harness/flutter_agent_harness.dart';
 
@@ -167,6 +170,7 @@ class ProviderRegistry extends ChangeNotifier {
   }) async {
     final registry = ProviderRegistry._(env, keychain, sessionKeys);
     await registry._load();
+    registry._restoreComfortState();
     return registry;
   }
 
@@ -241,6 +245,18 @@ class ProviderRegistry extends ChangeNotifier {
   /// gone. Notifies listeners so key-aware UI (the settings Keys section)
   /// refreshes.
   void rememberKey(String id, String key) {
+    if (faComfortEnabled) {
+      final owner = _providers.where((p) => p.id == id).firstOrNull;
+      if (owner == null) {
+        throw StateError('Cannot save a key for an unknown provider.');
+      }
+      faComfortWrite(
+        'key:' + id,
+        key.isEmpty
+            ? null
+            : jsonEncode({'endpoint': owner.baseUrl, 'key': key}),
+      );
+    }
     if (key.isEmpty) {
       _sessionKeys.remove(id);
     } else {
@@ -314,6 +330,10 @@ class ProviderRegistry extends ChangeNotifier {
   Future<void> update(CustomProvider updated) async {
     final index = _providers.indexWhere((p) => p.id == updated.id);
     if (index < 0) return;
+    if (faComfortEnabled && _providers[index].baseUrl != updated.baseUrl) {
+      faComfortWrite('key:' + updated.id, null);
+      _sessionKeys.remove(updated.id);
+    }
     _providers[index] = updated;
     await _save();
     notifyListeners();
@@ -327,6 +347,7 @@ class ProviderRegistry extends ChangeNotifier {
   /// gracefully (see [KeychainStore.delete]/[SessionKeysStore.delete]), so
   /// a failed secure-store delete never aborts the registry save.
   Future<void> remove(String id) async {
+    if (faComfortEnabled) faComfortWrite('key:' + id, null);
     final removed = _providers.where((p) => p.id == id).firstOrNull;
     _providers.removeWhere((p) => p.id == id);
     _sessionKeys.remove(id);
@@ -473,7 +494,42 @@ class ProviderRegistry extends ChangeNotifier {
     return scoped;
   }
 
+  void _restoreComfortState() {
+    if (!faComfortEnabled) return;
+    try {
+      final snapshot = faComfortRead('providers');
+      if (snapshot != null) _applyPersisted(snapshot);
+    } on Object {
+      // Retain the original fallback for corrupt browser data.
+    }
+    for (final provider in _providers) {
+      try {
+        final raw = faComfortRead('key:' + provider.id);
+        if (raw == null) continue;
+        final decoded = jsonDecode(raw);
+        if (decoded is Map &&
+            decoded['endpoint'] == provider.baseUrl &&
+            decoded['key'] is String &&
+            (decoded['key'] as String).isNotEmpty) {
+          _sessionKeys[provider.id] = decoded['key'] as String;
+        }
+      } on Object {
+        // Never attach malformed or endpoint-mismatched credentials.
+      }
+    }
+  }
+
   Future<void> _save() async {
+    if (faComfortEnabled) {
+      faComfortWrite(
+        'providers',
+        jsonEncode({
+          'version': _version,
+          'providers': [for (final provider in _providers) provider.toJson()],
+          'presetModels': _presetModels,
+        }),
+      );
+    }
     final env = _env;
     if (env == null) return;
     try {

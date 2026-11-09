@@ -3,6 +3,7 @@
 // in the LICENSE file.
 
 import 'package:flutter/material.dart';
+import 'package:fa_ui/src/stores/outlook_comfort_storage.dart';
 import 'package:flutter_agent_harness/flutter_agent_harness.dart'
     show ModelsEndpointFetcher;
 import 'package:url_launcher/url_launcher.dart';
@@ -241,6 +242,36 @@ class _ProviderEditorPageState extends State<ProviderEditorPage> {
   String? _error;
   var _presetSeeded = false;
   var _reauthRunning = false;
+  Future<void> _clearDeviceKey() async {
+    final provider = widget.initial;
+    final registry = widget.registry;
+    if (provider == null || registry == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清除已保存的 API Key？'),
+        content: const Text('删除此设备保存的该服务密钥，保留地址、模型和聊天。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('清除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      registry.rememberKey(provider.id, '');
+      _keyController.clear();
+      setState(() => _error = '已清除在此设备保存的 API Key。');
+    } on Object {
+      setState(() => _error = '清除失败：浏览器可能禁止访问本地存储。');
+    }
+  }
 
   bool get _isPreset => widget.preset != null;
 
@@ -582,7 +613,9 @@ class _ProviderEditorPageState extends State<ProviderEditorPage> {
                     child: Text(
                       _isPreset
                           ? faKeyNoteHosted(strings)
-                          : faEditorKeyNote(strings),
+                          : (faComfortEnabled
+                                ? '保存后将在此设备记住配置和密钥。'
+                                : faEditorKeyNote(strings)),
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -604,6 +637,17 @@ class _ProviderEditorPageState extends State<ProviderEditorPage> {
                     ),
                   ],
                 ),
+              ],
+              if (faComfortEnabled) ...[
+                const Text(
+                  '此修复版在当前设备保存配置和 API Key。密钥不上传到 GitHub，但本地存储不是加密保险库。',
+                ),
+                if (widget.initial != null && widget.registry != null)
+                  TextButton.icon(
+                    onPressed: _clearDeviceKey,
+                    icon: const Icon(Icons.key_off),
+                    label: const Text('清除已保存的 API Key'),
+                  ),
               ],
               ...faFormErrorBlock(context, _error),
               Row(

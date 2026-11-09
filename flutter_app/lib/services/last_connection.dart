@@ -126,6 +126,9 @@ class LastConnectionStore {
   /// effort: a failed write must not break the connect flow.
   Future<void> save(LastConnection connection) async {
     _connection = connection;
+    if (faComfortEnabled) {
+      faComfortWrite('connection', jsonEncode(connection.toJson()));
+    }
     final env = _env;
     if (env == null) return;
     try {
@@ -143,6 +146,23 @@ class LastConnectionStore {
       save(LastConnection.fromConfig(config));
 
   Future<void> _load() async {
+    if (faComfortEnabled) {
+      try {
+        final raw = faComfortRead('connection');
+        if (raw != null) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map<String, dynamic>) {
+            final restored = LastConnection.fromJson(decoded);
+            if (!_isRemovedKind(restored.providerKind)) {
+              _connection = restored;
+              return;
+            }
+          }
+        }
+      } on Object {
+        // Fall back to the existing non-secret connection record.
+      }
+    }
     await faLoadVersionedStore(
       _env,
       fileName: fileName,

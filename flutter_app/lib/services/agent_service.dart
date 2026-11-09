@@ -8,6 +8,8 @@ import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:fa_ui/fa_ui.dart'
     show
         FaApprovalModeController,
+        faComfortEnabled,
+        faComfortWrite,
         FaChatAttachment,
         FaChatConnection,
         FaChatMessage,
@@ -2211,6 +2213,20 @@ class AgentService extends ChangeNotifier
     _providerKind = config.providerKind;
     _activeBaseUrl = config.baseUrl;
     _activeApiKey = config.apiKey;
+    // Persist selection only; keys have a separate browser slot.
+    if (faComfortEnabled &&
+        config.baseUrl.isNotEmpty &&
+        config.modelId.isNotEmpty &&
+        config.modelId != 'placeholder') {
+      faComfortWrite(
+        'connection',
+        jsonEncode({
+          'providerKind': config.providerKind,
+          'modelId': config.modelId,
+          'baseUrl': config.baseUrl,
+        }),
+      );
+    }
     _responseTimeout = _isOnDeviceKind(config.providerKind)
         ? const Duration(minutes: 10)
         : isCodeMieProvider(config.baseUrl)

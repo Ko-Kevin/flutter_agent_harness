@@ -2034,6 +2034,10 @@ class _WideLayoutShellState extends State<WideLayoutShell>
   /// Personal sandbox. The created session's cwd (and its drawer group)
   /// follows the folder.
   Future<void> _newSession() async {
+    if (faComfortEnabled) {
+      await _mintSessionFromBrand();
+      return;
+    }
     final target = _newSessionTarget;
     if (target == null) return;
     // Relay sessions (extension panel) live in the service worker: reset
@@ -2172,6 +2176,9 @@ class _WideLayoutShellState extends State<WideLayoutShell>
       // Fire-and-forget: the ack is flow control for nobody.
       unawaited(HapticFeedback.mediumImpact());
       await _createSessionInChosenFolder(target.service, target.config);
+      if (faComfortEnabled && mounted && _isNarrow) {
+        unawaited(_pushNarrowChat());
+      }
     } on Object catch (error) {
       // The long-press fires through unawaited(...) — a raw clone or
       // initialize failure would surface as an unhandled zone error with

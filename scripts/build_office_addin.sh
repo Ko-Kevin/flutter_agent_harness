@@ -56,7 +56,7 @@ echo "building fa web app (flutter build web --release)…"
 ( cd flutter_app && flutter pub get --enforce-lockfile >/dev/null && \
   FLUTTER_WEB_CANVASKIT_URL=./canvaskit/ \
   flutter build web --release --pwa-strategy=none --base-href=/outlook/app/ \
-    --dart-define=FA_HOST=office )
+    --dart-define=FA_HOST=office --dart-define=FA_OUTLOOK_COMFORT=true )
 rm -rf "$out/app"
 mkdir -p "$out/app"
 cp -R flutter_app/build/web/. "$out/app/"

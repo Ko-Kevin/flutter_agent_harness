@@ -19,40 +19,34 @@ extension AgentServiceWiring on AgentService {
       return transformersJsStreamFunction(createTransformersJsService());
     }
 
-    return decorateAuthErrors(
-      (model, context, {cancelToken}) {
-        final registry = _providerRegistry;
-        final provider = registry?.byBaseUrl(config.baseUrl);
+    return decorateAuthErrors((model, context, {cancelToken}) {
+      final registry = _providerRegistry;
+      final provider = registry?.byBaseUrl(config.baseUrl);
 
-        final currentKey = provider == null
-            ? config.apiKey
-            : (registry?.keyFor(provider.id) ?? config.apiKey);
+      final currentKey = provider == null
+          ? config.apiKey
+          : (registry?.keyFor(provider.id) ?? '');
 
-        // CodeMie carries cookie authentication in model.headers.
-        // Do not add bearer authentication for that provider.
-        final usesCookieAuth = isCodeMieProvider(config.baseUrl);
+      // CodeMie carries cookie authentication in model.headers.
+      // Do not add bearer authentication for that provider.
+      final usesCookieAuth = isCodeMieProvider(config.baseUrl);
 
-        if (!usesCookieAuth &&
-            provider != null &&
-            provider.requiresKey &&
-            currentKey.trim().isEmpty) {
-          throw StateError(
-            'API key missing for the selected provider. '
-            'Enter it in provider settings and save.',
-          );
-        }
+      if (!usesCookieAuth &&
+          provider != null &&
+          provider.requiresKey &&
+          currentKey.trim().isEmpty) {
+        throw StateError(
+          'API key missing for the selected provider. '
+          'Enter it in provider settings and save.',
+        );
+      }
 
-        return providerStreamFunction(
-          config.providerKind,
-          usesCookieAuth ? '' : currentKey,
-          sessionId: () => _session?.cachedId,
-        )(model, context, cancelToken: cancelToken);
-      },
-      () => _connectionDisplayName(
-        _providerRegistry,
-        config.baseUrl,
-      ),
-    );
+      return providerStreamFunction(
+        config.providerKind,
+        usesCookieAuth ? '' : currentKey,
+        sessionId: () => _session?.cachedId,
+      )(model, context, cancelToken: cancelToken);
+    }, () => _connectionDisplayName(_providerRegistry, config.baseUrl));
   }
 
   /// Attaches secret-redaction hooks and the layered redaction pipeline.
@@ -68,8 +62,7 @@ extension AgentServiceWiring on AgentService {
 
     attachSecretRedactor(_agent, redactor);
 
-    if (_yamlRedactConfig is RedactionConfig &&
-        !_yamlRedactConfig!.enabled) {
+    if (_yamlRedactConfig is RedactionConfig && !_yamlRedactConfig!.enabled) {
       return;
     }
 
@@ -206,10 +199,7 @@ extension AgentServiceWiring on AgentService {
     final role = _taskRolesResolver?.resolveRole(smolModelRole);
     if (role != null) return role;
 
-    return (
-      model: _agent.state.model,
-      stream: _agent.streamFunction,
-    );
+    return (model: _agent.state.model, stream: _agent.streamFunction);
   }
 
   /// Routes ask-tool questions to the installed handler.
