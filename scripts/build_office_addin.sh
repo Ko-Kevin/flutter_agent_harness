@@ -139,7 +139,7 @@ csp = (
     '  <meta http-equiv="Content-Security-Policy" content="'
     "default-src 'self'; "
     "script-src 'self' 'wasm-unsafe-eval' blob: "
-    'https://appsforoffice.microsoft.com https://cdn.jsdelivr.net; '
+        'https://appsforoffice.microsoft.com https://cdn.jsdelivr.net https://ajax.aspnetcdn.com; '
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
