@@ -158,7 +158,14 @@ jobs:
           text = text.replace('<Version>1.2.0.0</Version>', '<Version>1.2.0.1</Version>')
           text = text.replace('https://fa1.dev/outlook', site + '/outlook')
           text = text.replace('<AppDomain>https://fa1.dev</AppDomain>', '<AppDomain>' + origin + '</AppDomain>')
-          text = text.replace('DefaultValue="fa"', 'DefaultValue="fa Fixed"')
+                    text = text.replace('<DisplayName DefaultValue="fa"/>', '<DisplayName DefaultValue="邮件智助"/>')
+          text = text.replace('<DisplayName DefaultValue="fa Fixed"/>', '<DisplayName DefaultValue="邮件智助"/>')
+          text = text.replace('id="groupLabel" DefaultValue="fa"', 'id="groupLabel" DefaultValue="邮件智助"')
+          text = text.replace('id="paneButtonLabel" DefaultValue="fa"', 'id="paneButtonLabel" DefaultValue="AI 助手"')
+          text = text.replace('id="paneButtonTitle" DefaultValue="fa"', 'id="paneButtonTitle" DefaultValue="AI 助手"')
+          text = text.replace('DefaultValue="fa — your agent in Outlook: the fa assistant in the taskpane, mail tools for the agent."', 'DefaultValue="总结邮件、翻译与起草回复"')
+          text = text.replace('DefaultValue="Open the fa taskpane: your agent inside this message, with approval-gated mail tools."', 'DefaultValue="总结邮件、翻译与起草回复"')
+          text = text.replace('<Version>1.2.0.1</Version>', '<Version>1.2.0.2</Version>')
           doc = ET.fromstring(text)
           for element in doc.iter():
               tag = element.tag.split('}')[-1]
